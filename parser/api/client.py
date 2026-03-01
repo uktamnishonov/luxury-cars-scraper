@@ -4,6 +4,7 @@ API клиент для взаимодействия с Encar.com API
 
 import json
 import time
+import random
 from typing import Dict, Optional
 import requests
 
@@ -16,6 +17,7 @@ from parser.config.config import (
     API_LIST_ENDPOINT,
     API_VEHICLE_DETAIL_ENDPOINT,
     DELAY_BETWEEN_REQUESTS,
+    DELAY_RANDOMIZATION,
     REQUEST_TIMEOUT,
     RETRY_ATTEMPTS,
 )
@@ -99,8 +101,8 @@ class EncarAPIClient:
                     logger.error(f"API вернул ошибку: {json_data.get('error')}")
                     return None
 
-                # Добавляем задержку между запросами
-                time.sleep(DELAY_BETWEEN_REQUESTS)
+                # Добавляем случайную задержку между запросами
+                self._apply_delay()
 
                 return json_data
 
@@ -119,6 +121,11 @@ class EncarAPIClient:
                 else:
                     logger.error(f"Все попытки исчерпаны для URL: {url}")
                     return None
+
+    def _apply_delay(self):
+        """Применяет случайную задержку между запросами для избежания блокировки"""
+        delay = DELAY_BETWEEN_REQUESTS + random.uniform(0, DELAY_RANDOMIZATION)
+        time.sleep(delay)
 
     def get_car_list(
         self,

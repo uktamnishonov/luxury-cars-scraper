@@ -3,6 +3,8 @@
 """
 
 import json
+import time
+import random
 from datetime import datetime
 from typing import List, Optional, Set
 
@@ -10,7 +12,14 @@ from logger.logging import get_parser_logger
 from config.paths import DATA_DETAILS_DIR, IDS_FILE, get_timestamped_filename
 
 from parser.api.client import EncarAPIClient
-from parser.config.config import FIELDS_TO_EXTRACT, SMALL_FIELDS_TO_EXTRACT, OPTIONS
+from parser.config.config import (
+    FIELDS_TO_EXTRACT,
+    SMALL_FIELDS_TO_EXTRACT,
+    OPTIONS,
+    ACCIDENT_CHECK_DELAY,
+    DELAY_RANDOMIZATION,
+    BROWSER_RESTART_INTERVAL,
+)
 from parser.processing.processor import DataProcessor
 from parser.processing.rules import (
     CUSTOM_PROCESSING_RULES,
@@ -47,6 +56,19 @@ class VehicleDetailsFetcher:
         self.check_history = check_history
         self._ensure_details_dir()
 
+        # Browser instance for accident history checking (reusable)
+        self.playwright = None
+        self.browser = None
+        self.browser_page = None
+        self.browser_check_counter = (
+            0  # Track cars processed since last browser restart
+        )
+        self.next_restart_at = random.randint(
+            BROWSER_RESTART_INTERVAL - 10, BROWSER_RESTART_INTERVAL + 10
+        )  # Random restart interval (90-110 cars)
+        if check_history:
+            self._init_browser()
+
         # Статистика фильтрации
         self.filter_stats = {
             "total_processed": 0,
@@ -56,6 +78,70 @@ class VehicleDetailsFetcher:
     def _ensure_details_dir(self):
         """Создает директорию для деталей если её нет"""
         DATA_DETAILS_DIR.mkdir(parents=True, exist_ok=True)
+
+    def _init_browser(self):
+        """
+        Initialize ONE browser instance + ONE tab for reuse across ALL cars.
+        Much faster than creating new browser/tab for each car.
+        This single tab will be reused for all 19,511+ accident checks.
+        """
+        try:
+            from playwright.sync_api import sync_playwright
+
+            self.playwright = sync_playwright().start()
+            self.browser = self.playwright.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-dev-shm-usage",
+                    "--no-sandbox",
+                ],
+            )
+            self.browser_page = self.browser.new_page()
+            logger.info(
+                "🌐 Browser initialized with ONE reusable tab for all accident checks"
+            )
+        except Exception as e:
+            logger.error(f"Failed to initialize browser: {e}")
+            self.playwright = None
+            self.browser = None
+            self.browser_page = None
+
+    def _restart_browser(self):
+        """
+        Restart browser to simulate human behavior (taking breaks, new sessions).
+        Called at random intervals (90-110 cars) to look more natural.
+        """
+        try:
+            logger.info(
+                f"🔄 Restarting browser after {self.browser_check_counter} cars (session break)..."
+            )
+
+            # Close existing browser
+            if self.browser_page:
+                self.browser_page.close()
+            if self.browser:
+                self.browser.close()
+            if self.playwright:
+                self.playwright.stop()
+
+            # Reset counter and set new random restart target
+            self.browser_check_counter = 0
+            self.next_restart_at = random.randint(
+                BROWSER_RESTART_INTERVAL - 10, BROWSER_RESTART_INTERVAL + 10
+            )
+            logger.info(f"⏱️ Next restart scheduled in ~{self.next_restart_at} cars")
+
+            # Small pause to simulate break (2-5 seconds)
+            time.sleep(random.uniform(2, 5))
+
+            # Initialize new browser
+            self._init_browser()
+            logger.info("✅ Browser restarted successfully")
+        except Exception as e:
+            logger.error(f"Error restarting browser: {e}")
+            # Try to reinitialize
+            self._init_browser()
 
     def _load_ids(self) -> List[str]:
         """Загружает список ID из файла"""
@@ -161,6 +247,7 @@ class VehicleDetailsFetcher:
     def _check_accident_history_public(self, accident_url: str) -> dict:
         """
         Check accident history from public data (no login required)
+        Uses reusable browser instance for speed
 
         Args:
             accident_url: URL to the accident report page
@@ -171,66 +258,68 @@ class VehicleDetailsFetcher:
             - details: list of accident records with type, count, and cost
         """
         import re
-        from playwright.sync_api import sync_playwright
-        import time
+
+        if not self.browser_page:
+            logger.warning("Browser not initialized, skipping accident history check")
+            return {"has_accident": None, "details": []}
 
         try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
-                page = browser.new_page()
+            # Reuse existing browser page (much faster)
+            page = self.browser_page
 
-                # Load the accident report page
-                page.goto(accident_url, wait_until="networkidle", timeout=30000)
-                time.sleep(2)
+            # Load the accident report page (use 'load' instead of 'networkidle' for speed)
+            page.goto(accident_url, wait_until="load", timeout=10000)
 
-                # Get page text
-                page_text = page.evaluate("() => document.body.innerText")
-                browser.close()
+            # Wait just for text to be available (minimal wait)
+            page.wait_for_selector("body", timeout=3000)
 
-                # Pattern: "보험사고 이력 (타차 가해) 1회/303,770원" or "(내차 피해) 2회832,400원"
-                # Pattern for own damage: 보험사고 이력 (내차 피해) X회Y원
-                own_damage_pattern = (
-                    r"보험사고\s*이력\s*\(내차\s*피해\)\s*(\d+)회\s*([\d,]+)원"
-                )
-                # Pattern for damage to others: 보험사고 이력 (타차 가해) X회/Y원
-                others_damage_pattern = (
-                    r"보험사고\s*이력\s*\(타차\s*가해\)\s*(\d+)회[/\s]*([\d,]+)원"
-                )
+            # Get page text
+            page_text = page.evaluate("() => document.body.innerText")
 
-                accident_details = []
-                has_accident = False
+            # Pattern: "보험사고 이력 (타차 가해) 1회/303,770원" or "(내차 피해) 2회832,400원"
+            # Pattern for own damage: 보험사고 이력 (내차 피해) X회Y원
+            own_damage_pattern = (
+                r"보험사고\s*이력\s*\(내차\s*피해\)\s*(\d+)회\s*([\d,]+)원"
+            )
+            # Pattern for damage to others: 보험사고 이력 (타차 가해) X회/Y원
+            others_damage_pattern = (
+                r"보험사고\s*이력\s*\(타차\s*가해\)\s*(\d+)회[/\s]*([\d,]+)원"
+            )
 
-                # Check for own damage accidents (my car was damaged - victim)
-                own_matches = re.findall(own_damage_pattern, page_text)
-                for match in own_matches:
-                    count = int(match[0])
-                    cost = match[1]
-                    if count > 0:
-                        has_accident = True
-                        accident_details.append(
-                            {
-                                "accident_type": "Accidents Caused By Other Drivers",
-                                "accident_count": count,
-                                "total_cost": cost,
-                            }
-                        )
+            accident_details = []
+            has_accident = False
 
-                # Check for damage to others accidents (I damaged another car - at fault)
-                others_matches = re.findall(others_damage_pattern, page_text)
-                for match in others_matches:
-                    count = int(match[0])
-                    cost = match[1]
-                    if count > 0:
-                        has_accident = True
-                        accident_details.append(
-                            {
-                                "accident_type": "Accidents Caused By This Car's Owner",
-                                "accident_count": count,
-                                "total_cost": cost,
-                            }
-                        )
+            # Check for own damage accidents (my car was damaged - victim)
+            own_matches = re.findall(own_damage_pattern, page_text)
+            for match in own_matches:
+                count = int(match[0])
+                cost = match[1]
+                if count > 0:
+                    has_accident = True
+                    accident_details.append(
+                        {
+                            "accident_type": "Accidents Caused By Other Drivers",
+                            "accident_count": count,
+                            "total_cost": cost,
+                        }
+                    )
 
-                return {"has_accident": has_accident, "details": accident_details}
+            # Check for damage to others accidents (I damaged another car - at fault)
+            others_matches = re.findall(others_damage_pattern, page_text)
+            for match in others_matches:
+                count = int(match[0])
+                cost = match[1]
+                if count > 0:
+                    has_accident = True
+                    accident_details.append(
+                        {
+                            "accident_type": "Accidents Caused By This Car's Owner",
+                            "accident_count": count,
+                            "total_cost": cost,
+                        }
+                    )
+
+            return {"has_accident": has_accident, "details": accident_details}
 
         except Exception as e:
             logger.error(f"Error checking public accident data: {e}")
@@ -319,6 +408,19 @@ class VehicleDetailsFetcher:
                             "has_accident"
                         ]
                         filtered_details["accident_details"] = accident_info["details"]
+
+                        # Increment browser counter
+                        self.browser_check_counter += 1
+
+                        # Restart browser at random intervals (90-110 cars) to look more human
+                        if self.browser_check_counter >= self.next_restart_at:
+                            self._restart_browser()
+
+                        # Добавляем дополнительную случайную задержку после проверки аварий
+                        delay = ACCIDENT_CHECK_DELAY + random.uniform(
+                            0, DELAY_RANDOMIZATION
+                        )
+                        time.sleep(delay)
                     except Exception as e:
                         logger.error(
                             f"Error checking accident history for {vehicle_id}: {e}"
@@ -413,3 +515,14 @@ class VehicleDetailsFetcher:
     def close(self):
         """Закрывает соединения"""
         self.client.close()
+
+        # Close browser instance if it was initialized
+        if self.browser_page:
+            self.browser_page.close()
+            logger.info("🌐 Browser page closed")
+        if self.browser:
+            self.browser.close()
+            logger.info("🌐 Browser closed")
+        if self.playwright:
+            self.playwright.stop()
+            logger.info("🌐 Playwright stopped")

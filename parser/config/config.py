@@ -38,7 +38,13 @@ ENABLE_AUTO_TRANSLATE = True
 # Настройки HTTP запросов
 REQUEST_TIMEOUT = 30  # Таймаут в секундах
 RETRY_ATTEMPTS = 3  # Количество попыток при ошибке
-DELAY_BETWEEN_REQUESTS = 0.5  # Задержка между запросами (секунды)
+DELAY_BETWEEN_REQUESTS = 0.3  # Задержка между запросами (секунды)
+DELAY_RANDOMIZATION = 0.2  # Случайная добавка к задержке (0-0.2 сек)
+ACCIDENT_CHECK_DELAY = 0.3  # Дополнительная задержка для проверки аварий (секунды)
+MAX_REQUESTS_PER_MINUTE = 50  # Ограничение запросов в минуту (консервативное значение)
+BROWSER_RESTART_INTERVAL = (
+    100  # Перезапуск браузера примерно каждые N автомобилей (±10 случайно)
+)
 
 # Параметры данных
 FIELDS_TO_EXTRACT = {
