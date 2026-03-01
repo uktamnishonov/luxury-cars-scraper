@@ -20,7 +20,11 @@ PARAMS = {
     "페라리": "",
     "롤스로이스": "",
     "벤틀리": "",
-    "마세라티": "",
+    "BMW": "",
+    "벤츠": "",  # Mercedes-Benz (short form commonly used in Korea)
+    "랜드로버": "",
+    "포르쉐": "",
+    "캐딜락": "",
 }
 
 

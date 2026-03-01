@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import List, Optional, Set
 
 from logger.logging import get_parser_logger
-from config.paths import DATA_DETAILS_DIR, IDS_FILE
+from config.paths import DATA_DETAILS_DIR, IDS_FILE, get_timestamped_filename
 
 from parser.api.client import EncarAPIClient
 from parser.config.config import FIELDS_TO_EXTRACT, SMALL_FIELDS_TO_EXTRACT, OPTIONS
@@ -27,12 +27,23 @@ class VehicleDetailsFetcher:
     """Класс для получения детальной информации об автомобилях"""
 
     def __init__(
-        self, output_file: str = "all_details.jsonl", check_history: bool = True
+        self,
+        output_file: str = None,
+        check_history: bool = True,
+        use_timestamp: bool = True,
     ):
         self.client = EncarAPIClient()
         self.translator = Translator()
         self.processor = DataProcessor(processing_rules=CUSTOM_PROCESSING_RULES)
-        self.output_file = output_file
+
+        # Generate timestamped filename if enabled and no output_file specified
+        if use_timestamp and output_file is None:
+            self.output_file = get_timestamped_filename("cars_data", "jsonl")
+        elif output_file is None:
+            self.output_file = "cars_data.jsonl"
+        else:
+            self.output_file = output_file
+
         self.check_history = check_history
         self._ensure_details_dir()
 

@@ -121,7 +121,13 @@ class EncarAPIClient:
                     return None
 
     def get_car_list(
-        self, sell_type: str, brand: str, model: str, start: int, count: int
+        self,
+        sell_type: str,
+        brand: str,
+        model: str,
+        start: int,
+        count: int,
+        year_from: Optional[int] = None,
     ) -> Optional[Dict]:
         """
         Получает список автомобилей
@@ -132,6 +138,7 @@ class EncarAPIClient:
             model: Модель автомобиля
             start: Начальная позиция
             count: Количество результатов
+            year_from: Минимальный год выпуска (опционально)
 
         Returns:
             Dict с результатами или None
@@ -139,7 +146,18 @@ class EncarAPIClient:
         url = f"{API_BASE_URL}{API_LIST_ENDPOINT}"
 
         # Формируем query параметр
-        query = f"And.Hidden.N._.CarType.A._.Manufacturer.{brand}._.ModelGroup.{model}._.SellType.{sell_type}."
+        query = f"And.Hidden.N._.CarType.A._.Manufacturer.{brand}."
+
+        # Добавляем ModelGroup только если модель указана
+        if model:
+            query += f"_.ModelGroup.{model}."
+
+        # Добавляем фильтр по году если указан (до SellType)
+        if year_from:
+            query += f"_.FormYear.{year_from}-."
+
+        query += f"_.SellType.{sell_type}."
+
         sr = f"|MileageAsc|{start}|{count}"
 
         params = {"count": "true", "q": query, "sr": sr}

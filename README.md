@@ -79,10 +79,10 @@
 │   └── logging.py               # Централизованный логгер
 │
 ├── data/                         # Данные (создается автоматически)
-│   ├── car_ids.json             # Собранные ID
-│   ├── duplicated_ids.json      # Дубликаты
+│   ├── car_ids_YYYYMMDD_HHMMSS.json      # Собранные ID (с timestamp)
+│   ├── duplicated_ids_YYYYMMDD_HHMMSS.json  # Дубликаты (с timestamp)
 │   └── details/
-│       └── all_details.jsonl    # Детали автомобилей
+│       └── cars_data_YYYYMMDD_HHMMSS.jsonl  # Детали автомобилей (с timestamp)
 │
 ├── logs/                         # Логи (создается автоматически)
 │   ├── parser.log
@@ -248,7 +248,7 @@ FILTER_CONFIG = {
 
 ## 📊 Формат данных
 
-### Сохраненные детали (`data/details/all_details.jsonl`)
+### Сохраненные детали (`data/details/cars_data_YYYYMMDD_HHMMSS.jsonl`)
 
 ```json
 {
