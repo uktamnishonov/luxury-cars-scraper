@@ -1,0 +1,201 @@
+{
+  "cookies": [
+    {
+      "name": "_GRECAPTCHA",
+      "value": "09ADiQh0c2MSwwZD7H801SejaPB-r8TMI1GulqFDe7QZyhYnDKFj0Sr8rpirMXH3_7c30JN5WJjsvozb4iFg9qSBc",
+      "domain": "www.google.com",
+      "path": "/recaptcha",
+      "expires": 1776896143.784114,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "JSESSIONID",
+      "value": "8756A200B9A7A50DCCEA73270F92C226.mono-web-prod_193.175",
+      "domain": "www.encar.com",
+      "path": "/",
+      "expires": -1,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "WMONID",
+      "value": "Q-0uBVCgDHB",
+      "domain": "www.encar.com",
+      "path": "/",
+      "expires": 1792912542.565027,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "_encar_hostname",
+      "value": "https://www.encar.com",
+      "domain": ".encar.com",
+      "path": "/",
+      "expires": 1761430545,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "OAX",
+      "value": "XhOTJGj7+pEACELv",
+      "domain": ".encar.com",
+      "path": "/",
+      "expires": 1795904146.273738,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "test_cookie",
+      "value": "CheckForPermission",
+      "domain": ".doubleclick.net",
+      "path": "/",
+      "expires": 1761345046.316223,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "_fwb",
+      "value": "75DMNrSW8AN1ePRVscrRdz.1761344146424",
+      "domain": ".encar.com",
+      "path": "/",
+      "expires": 1795904146.42546,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "wcs_bt",
+      "value": "4b4e532670e38c:1761344146",
+      "domain": "www.encar.com",
+      "path": "/",
+      "expires": 1795904146.427118,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "PCID",
+      "value": "17613441464786678696208",
+      "domain": ".encar.com",
+      "path": "/",
+      "expires": 1795904146.478269,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "_enlog_lpi",
+      "value": "9856.aHR0cHM6Ly93d3cuZW5jYXIuY29tL2luZGV4LmRv.ebc",
+      "domain": ".encar.com",
+      "path": "/",
+      "expires": 1761345946,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "_ga",
+      "value": "GA1.2.306593651.1761344147",
+      "domain": ".encar.com",
+      "path": "/",
+      "expires": 1795904146.510351,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "_gid",
+      "value": "GA1.2.329883857.1761344147",
+      "domain": ".encar.com",
+      "path": "/",
+      "expires": 1761430546,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "_gat_UA-56065139-3",
+      "value": "1",
+      "domain": ".encar.com",
+      "path": "/",
+      "expires": 1761344206,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "_ga_WY0RWR65ED",
+      "value": "GS2.2.s1761344146$o1$g0$t1761344146$j60$l0$h0",
+      "domain": ".encar.com",
+      "path": "/",
+      "expires": 1795904146.638716,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "NAC",
+      "value": "fNOMCohqw36AB",
+      "domain": ".naver.com",
+      "path": "/",
+      "expires": 1795904146.647032,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "_fbp",
+      "value": "fb.1.1761344146801.898823815867833817",
+      "domain": ".encar.com",
+      "path": "/",
+      "expires": 1769120146,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "NWB",
+      "value": "f5e1af131a54676ecde2a7d125eaf455.1761344146628",
+      "domain": ".wcs.naver.com",
+      "path": "/",
+      "expires": 1795904147.343403,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "None"
+    }
+  ],
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+  "timestamp": 1761344178.6139205,
+  "fingerprint": {
+    "hardware_cores": 4,
+    "device_memory": 4,
+    "screen_width": 1366,
+    "screen_height": 768,
+    "battery_level": 0.77,
+    "is_charging": false,
+    "connection_type": "4g",
+    "rtt": 77,
+    "downlink": 37.8,
+    "webgl_vendor": "Google Inc. (Intel)",
+    "webgl_renderer": "ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0)",
+    "canvas_seed": 11361
+  },
+  "fingerprint_check": {
+    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+    "platform": "Win32",
+    "language": "ko-KR",
+    "hardwareConcurrency": 8,
+    "deviceMemory": 4,
+    "webdriver": false,
+    "vendor": "Google Inc.",
+    "productSub": "20030107",
+    "maxTouchPoints": 0
+  }
+}

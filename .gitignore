@@ -1,0 +1,34 @@
+# Virtual environments
+myvenv/
+venv/
+env/
+.venv/
+.env
+
+# Data
+data/
+*.jsonl
+
+# Config secrets
+config/headers.json
+init_server.yaml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
