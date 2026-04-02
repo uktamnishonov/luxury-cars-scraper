@@ -75,6 +75,9 @@ class VehicleDetailsFetcher:
             "filtered_out": 0,
         }
 
+        self.accident_retry_ids = []  # IDs that need accident recheck
+        self.scrape_retry_ids = []  # IDs that failed to scrape
+
     def _ensure_details_dir(self):
         """Создает директорию для деталей если её нет"""
         DATA_DETAILS_DIR.mkdir(parents=True, exist_ok=True)
@@ -244,86 +247,294 @@ class VehicleDetailsFetcher:
 
         return result
 
-    def _check_accident_history_public(self, accident_url: str) -> dict:
-        """
-        Check accident history from public data (no login required)
-        Uses reusable browser instance for speed
-
-        Args:
-            accident_url: URL to the accident report page
-
-        Returns:
-            Dict with:
-            - has_accident: bool
-            - details: list of accident records with type, count, and cost
-        """
+    def _check_accident_history_public(self, accident_url: str, vehicle_id: str = None) -> dict:
         import re
 
+        result = {"has_accident": None, "details": []}
+
         if not self.browser_page:
-            logger.warning("Browser not initialized, skipping accident history check")
-            return {"has_accident": None, "details": []}
+            logger.warning(f"⚠️ Browser not initialized for {vehicle_id}, queueing for retry")
+            if vehicle_id:
+                self.accident_retry_ids.append(vehicle_id)
+            return result
 
         try:
-            # Reuse existing browser page (much faster)
             page = self.browser_page
-
-            # Load the accident report page (use 'load' instead of 'networkidle' for speed)
+            page.set_default_timeout(12000)  # 12 second timeout built into Playwright
+            
             page.goto(accident_url, wait_until="load", timeout=10000)
-
-            # Wait just for text to be available (minimal wait)
             page.wait_for_selector("body", timeout=3000)
-
-            # Get page text
             page_text = page.evaluate("() => document.body.innerText")
 
-            # Pattern: "보험사고 이력 (타차 가해) 1회/303,770원" or "(내차 피해) 2회832,400원"
-            # Pattern for own damage: 보험사고 이력 (내차 피해) X회Y원
-            own_damage_pattern = (
-                r"보험사고\s*이력\s*\(내차\s*피해\)\s*(\d+)회\s*([\d,]+)원"
-            )
-            # Pattern for damage to others: 보험사고 이력 (타차 가해) X회/Y원
-            others_damage_pattern = (
-                r"보험사고\s*이력\s*\(타차\s*가해\)\s*(\d+)회[/\s]*([\d,]+)원"
-            )
+            own_damage_pattern = r"보험사고\s*이력\s*\(내차\s*피해\)\s*(\d+)회\s*([\d,]+)원"
+            others_damage_pattern = r"보험사고\s*이력\s*\(타차\s*가해\)\s*(\d+)회[/\s]*([\d,]+)원"
 
-            accident_details = []
             has_accident = False
+            accident_details = []
 
-            # Check for own damage accidents (my car was damaged - victim)
-            own_matches = re.findall(own_damage_pattern, page_text)
-            for match in own_matches:
+            for match in re.findall(own_damage_pattern, page_text):
                 count = int(match[0])
-                cost = match[1]
                 if count > 0:
                     has_accident = True
-                    accident_details.append(
-                        {
-                            "accident_type": "Accidents Caused By Other Drivers",
-                            "accident_count": count,
-                            "total_cost": cost,
-                        }
-                    )
+                    accident_details.append({
+                        "accident_type": "Accidents Caused By Other Drivers",
+                        "accident_count": count,
+                        "total_cost": match[1],
+                    })
 
-            # Check for damage to others accidents (I damaged another car - at fault)
-            others_matches = re.findall(others_damage_pattern, page_text)
-            for match in others_matches:
+            for match in re.findall(others_damage_pattern, page_text):
                 count = int(match[0])
-                cost = match[1]
                 if count > 0:
                     has_accident = True
-                    accident_details.append(
-                        {
-                            "accident_type": "Accidents Caused By This Car's Owner",
-                            "accident_count": count,
-                            "total_cost": cost,
-                        }
-                    )
+                    accident_details.append({
+                        "accident_type": "Accidents Caused By This Car's Owner",
+                        "accident_count": count,
+                        "total_cost": match[1],
+                    })
 
-            return {"has_accident": has_accident, "details": accident_details}
+            result["has_accident"] = has_accident
+            result["details"] = accident_details
+            logger.info(f"✅ Accident check successful for {vehicle_id}: has_accident={has_accident}")
 
         except Exception as e:
-            logger.error(f"Error checking public accident data: {e}")
-            return {"has_accident": None, "details": []}
+            error_msg = str(e)
+            logger.warning(f"⚠️ Accident check failed for {vehicle_id}: {error_msg}")
+            
+            # ALWAYS queue for retry if check failed - ensure no car is left behind
+            if vehicle_id and vehicle_id not in self.accident_retry_ids:
+                self.accident_retry_ids.append(vehicle_id)
+                logger.info(f"📋 Queued {vehicle_id} for retry (total queued: {len(self.accident_retry_ids)})")
+            
+            # If browser is in bad state, restart it
+            if "browser" in error_msg.lower() or "closed" in error_msg.lower():
+                logger.info("🔄 Restarting browser due to browser error")
+                try:
+                    self._restart_browser()
+                except Exception as restart_err:
+                    logger.error(f"Failed to restart browser: {restart_err}")
+
+        return result
+
+    def _retry_failed_accident_checks(self):
+        """
+        Retry accident history checks that previously failed.
+        Keep retrying until all cars have accident data (or are truly unreachable).
+        """
+        if not self.accident_retry_ids:
+            logger.info("✅ All cars successfully processed - no retries needed")
+            return
+
+        logger.info("=" * 70)
+        logger.info(f"🔄 RETRY PHASE: Attempting to complete accident checks for {len(self.accident_retry_ids)} cars")
+        logger.info("=" * 70)
+
+        file_path = DATA_DETAILS_DIR / self.output_file
+        max_retry_attempts = 3
+        retry_attempt = 0
+        cars_to_retry = self.accident_retry_ids.copy()
+
+        while cars_to_retry and retry_attempt < max_retry_attempts:
+            retry_attempt += 1
+            logger.info(f"🔄 Retry attempt {retry_attempt}/{max_retry_attempts}")
+            
+            still_failing = []
+
+            for vehicle_id in cars_to_retry:
+                logger.info(f"🔄 Retrying car ID: {vehicle_id}")
+
+                # Read the already-saved record
+                lines = []
+                target_line_idx = None
+                try:
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        for i, line in enumerate(f):
+                            lines.append(line)
+                            if line.strip():
+                                data = json.loads(line)
+                                if str(data.get("id")) == str(vehicle_id):
+                                    target_line_idx = i
+                except Exception as e:
+                    logger.error(f"Error reading file for retry: {e}")
+                    still_failing.append(vehicle_id)
+                    continue
+
+                if target_line_idx is None:
+                    logger.warning(f"ID {vehicle_id} not found in output file")
+                    still_failing.append(vehicle_id)
+                    continue
+
+                # Get the accident URL from the saved record
+                try:
+                    saved_record = json.loads(lines[target_line_idx])
+                    accident_url = saved_record.get("details", {}).get("accident_report_url")
+
+                    if not accident_url:
+                        logger.warning(f"No accident URL for ID {vehicle_id}")
+                        still_failing.append(vehicle_id)
+                        continue
+
+                    # Retry the check
+                    logger.info(f"   Checking accident URL: {accident_url}")
+                    accident_info = self._check_accident_history_public(accident_url, vehicle_id=None)
+
+                    if accident_info["has_accident"] is None:
+                        logger.warning(f"⚠️ Retry still failed for ID {vehicle_id}")
+                        still_failing.append(vehicle_id)
+                        continue
+
+                    # Update the record with accident data
+                    saved_record["details"]["has_accident_history"] = accident_info["has_accident"]
+                    saved_record["details"]["accident_details"] = accident_info["details"]
+                    lines[target_line_idx] = json.dumps(saved_record, ensure_ascii=False) + "\n"
+
+                    # Rewrite the file with updated record
+                    with open(file_path, "w", encoding="utf-8") as f:
+                        f.writelines(lines)
+                    logger.info(f"✅ Accident data SAVED for ID {vehicle_id}: has_accident={accident_info['has_accident']}")
+
+                except Exception as e:
+                    logger.error(f"Error processing retry for ID {vehicle_id}: {e}")
+                    still_failing.append(vehicle_id)
+
+            cars_to_retry = still_failing
+            
+            if cars_to_retry:
+                logger.info(f"⏳ {len(cars_to_retry)} cars still failing, resting before retry...")
+                time.sleep(5)  # Brief rest between retry attempts
+
+        # Final report
+        logger.info("=" * 70)
+        if cars_to_retry:
+            logger.warning(f"⚠️ {len(cars_to_retry)} cars could not get accident history after {max_retry_attempts} attempts:")
+            for vid in cars_to_retry:
+                logger.warning(f"   - ID {vid}")
+        else:
+            logger.info(f"✅ All {len(self.accident_retry_ids)} cars successfully retried!")
+        logger.info("=" * 70)
+
+        self.accident_retry_ids.clear()
+
+    def _retry_failed_scrapes(
+        self,
+        translate: bool = True,
+        process_data: bool = True,
+        apply_data_filters: bool = False,
+        max_retry_attempts: int = 2,
+    ):
+        """
+        Retries fetching details for cars that failed during the initial scrape phase
+        
+        Args:
+            translate: Whether to translate korean terms
+            process_data: Whether to apply data processing rules
+            apply_data_filters: Whether to apply filters
+            max_retry_attempts: Number of retry attempts (default 2)
+        """
+        if not self.scrape_retry_ids:
+            return
+
+        logger.info("=" * 70)
+        logger.info(f"🔄 RETRYING {len(self.scrape_retry_ids)} FAILED SCRAPES")
+        logger.info("=" * 70)
+
+        cars_to_retry = self.scrape_retry_ids.copy()
+        retry_attempt = 0
+        successfully_retried = 0
+
+        while cars_to_retry and retry_attempt < max_retry_attempts:
+            retry_attempt += 1
+            logger.info(f"🔄 Retry attempt {retry_attempt}/{max_retry_attempts} for {len(cars_to_retry)} cars")
+
+            still_failing = []
+
+            for vehicle_id in cars_to_retry:
+                try:
+                    logger.info(f"🔄 Retrying car ID: {vehicle_id}")
+
+                    # Try to fetch details again
+                    details = self.client.get_vehicle_details(vehicle_id)
+
+                    if not details:
+                        logger.warning(f"⚠️ Still failed to fetch details for ID {vehicle_id}")
+                        still_failing.append(vehicle_id)
+                        continue
+
+                    # Extract fields
+                    filtered_details = self._extract_fields(details, FIELDS_TO_EXTRACT)
+                    filtered_details["options"] = self._parse_options(
+                        details.get("options")
+                    )
+
+                    # Check accident history
+                    if self.check_history and filtered_details.get("accident_report_url"):
+                        try:
+                            accident_info = self._check_accident_history_public(
+                                filtered_details["accident_report_url"],
+                                vehicle_id=vehicle_id,
+                            )
+                            filtered_details["has_accident_history"] = accident_info[
+                                "has_accident"
+                            ]
+                            filtered_details["accident_details"] = accident_info["details"]
+                        except Exception as e:
+                            logger.error(
+                                f"Error checking accident history on retry for {vehicle_id}: {e}"
+                            )
+                            filtered_details["has_accident_history"] = None
+                            filtered_details["accident_details"] = []
+                    else:
+                        filtered_details["has_accident_history"] = None
+                        filtered_details["accident_details"] = []
+
+                    # Process data
+                    if process_data:
+                        filtered_details = self.processor.process_dict(filtered_details)
+
+                    # Translate
+                    if translate:
+                        filtered_details = self.translator.translate_dict(filtered_details)
+
+                    # Apply filters
+                    if apply_data_filters:
+                        if not apply_filters(filtered_details, FILTER_CONFIG):
+                            logger.info(f"⊘ ID {vehicle_id} filtered out on retry")
+                            successfully_retried += 1
+                            continue
+
+                    # Save the vehicle details
+                    filtered_details["parsed_at"] = datetime.now().strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    )
+                    self._save_vehicle_details_incremental(vehicle_id, filtered_details)
+                    logger.info(f"✅ Successfully retried and saved ID {vehicle_id}")
+                    successfully_retried += 1
+
+                except Exception as e:
+                    logger.error(f"Error retrying car ID {vehicle_id}: {e}")
+                    still_failing.append(vehicle_id)
+
+            cars_to_retry = still_failing
+
+            if cars_to_retry:
+                logger.info(
+                    f"⏳ {len(cars_to_retry)} cars still failing, resting before retry..."
+                )
+                time.sleep(5)  # Brief rest between retry attempts
+
+        # Final report
+        logger.info("=" * 70)
+        logger.info(
+            f"✅ Retry complete: {successfully_retried} cars successfully retried"
+        )
+        if cars_to_retry:
+            logger.warning(
+                f"⚠️ {len(cars_to_retry)} cars could not be scraped after {max_retry_attempts} attempts:"
+            )
+            for vid in cars_to_retry:
+                logger.warning(f"   - ID {vid}")
+        logger.info("=" * 70)
+
+        self.scrape_retry_ids.clear()
 
     def fetch_details(
         self,
@@ -375,96 +586,123 @@ class VehicleDetailsFetcher:
         logger.info("=" * 60)
 
         for idx, vehicle_id in enumerate(vehicle_ids, 1):
-            # Пропускаем уже обработанные
-            if skip_existing and vehicle_id in already_fetched:
-                skipped += 1
-                if skipped % 100 == 0:
-                    logger.info(
-                        f"[{idx}/{total}] Пропущено {skipped} уже обработанных ID"
+            try:
+                # Пропускаем уже обработанные
+                if skip_existing and vehicle_id in already_fetched:
+                    skipped += 1
+                    if skipped % 100 == 0:
+                        logger.info(
+                            f"[{idx}/{total}] Пропущено {skipped} уже обработанных ID"
+                        )
+                    continue
+
+                logger.info(f"[{idx}/{total}] Получаем детали для ID: {vehicle_id}")
+
+                # Получаем детали
+                details = self.client.get_vehicle_details(vehicle_id)
+
+                if details:
+                    # Извлекаем только нужные поля
+                    filtered_details = self._extract_fields(details, FIELDS_TO_EXTRACT)
+
+                    filtered_details["options"] = self._parse_options(
+                        details.get("options")
                     )
-                continue
 
-            logger.info(f"[{idx}/{total}] Получаем детали для ID: {vehicle_id}")
+                    # Check accident history from public data (no login required)
+                    if self.check_history and filtered_details.get("accident_report_url"):
+                        logger.info(f"[{idx}/{total}] 🔍 Checking accident history...")
+                        try:
+                            accident_info = self._check_accident_history_public(
+                                filtered_details["accident_report_url"],
+                                vehicle_id=vehicle_id,
+                            )
+                            filtered_details["has_accident_history"] = accident_info[
+                                "has_accident"
+                            ]
+                            filtered_details["accident_details"] = accident_info["details"]
 
-            # Получаем детали
-            details = self.client.get_vehicle_details(vehicle_id)
+                            # Increment browser counter
+                            self.browser_check_counter += 1
 
-            if details:
-                # Извлекаем только нужные поля
-                filtered_details = self._extract_fields(details, FIELDS_TO_EXTRACT)
+                            # Restart browser at random intervals (90-110 cars) to look more human
+                            if self.browser_check_counter >= self.next_restart_at:
+                                self._restart_browser()
 
-                filtered_details["options"] = self._parse_options(
-                    details.get("options")
-                )
-
-                # Check accident history from public data (no login required)
-                if self.check_history and filtered_details.get("accident_report_url"):
-                    logger.info(f"[{idx}/{total}] 🔍 Checking accident history...")
-                    try:
-                        accident_info = self._check_accident_history_public(
-                            filtered_details["accident_report_url"]
-                        )
-                        filtered_details["has_accident_history"] = accident_info[
-                            "has_accident"
-                        ]
-                        filtered_details["accident_details"] = accident_info["details"]
-
-                        # Increment browser counter
-                        self.browser_check_counter += 1
-
-                        # Restart browser at random intervals (90-110 cars) to look more human
-                        if self.browser_check_counter >= self.next_restart_at:
-                            self._restart_browser()
-
-                        # Добавляем дополнительную случайную задержку после проверки аварий
-                        delay = ACCIDENT_CHECK_DELAY + random.uniform(
-                            0, DELAY_RANDOMIZATION
-                        )
-                        time.sleep(delay)
-                    except Exception as e:
-                        logger.error(
-                            f"Error checking accident history for {vehicle_id}: {e}"
-                        )
+                            # Добавляем дополнительную случайную задержку после проверки аварий
+                            delay = ACCIDENT_CHECK_DELAY + random.uniform(
+                                0, DELAY_RANDOMIZATION
+                            )
+                            time.sleep(delay)
+                        except Exception as e:
+                            logger.error(
+                                f"Error checking accident history for {vehicle_id}: {e}"
+                            )
+                            filtered_details["has_accident_history"] = None
+                            filtered_details["accident_details"] = []
+                    else:
                         filtered_details["has_accident_history"] = None
                         filtered_details["accident_details"] = []
-                else:
-                    filtered_details["has_accident_history"] = None
-                    filtered_details["accident_details"] = []
 
-                # 1. Обрабатываем данные (очистка, форматирование)
-                if process_data:
-                    filtered_details = self.processor.process_dict(filtered_details)
+                    # 1. Обрабатываем данные (очистка, форматирование)
+                    if process_data:
+                        filtered_details = self.processor.process_dict(filtered_details)
 
-                # 2. Переводим
-                if translate:
-                    filtered_details = self.translator.translate_dict(filtered_details)
+                    # 2. Переводим
+                    if translate:
+                        filtered_details = self.translator.translate_dict(filtered_details)
 
-                # 3. Применяем фильтры
-                self.filter_stats["total_processed"] += 1
-                if apply_data_filters:
-                    if not apply_filters(filtered_details, FILTER_CONFIG):
-                        self.filter_stats["filtered_out"] += 1
-                        logger.info(f"[{idx}/{total}] ⊘ ID {vehicle_id} отфильтрован")
-                        continue
+                    # 3. Применяем фильтры
+                    self.filter_stats["total_processed"] += 1
+                    if apply_data_filters:
+                        if not apply_filters(filtered_details, FILTER_CONFIG):
+                            self.filter_stats["filtered_out"] += 1
+                            logger.info(f"[{idx}/{total}] ⊘ ID {vehicle_id} отфильтрован")
+                            continue
 
-                filtered_details["parsed_at"] = datetime.now().strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                )
-
-                # 4. Сохраняем
-                self._save_vehicle_details_incremental(vehicle_id, filtered_details)
-                processed += 1
-
-                if processed % 10 == 0:
-                    logger.info(
-                        f"Обработано {processed}/{total - skipped} новых записей"
+                    filtered_details["parsed_at"] = datetime.now().strftime(
+                        "%Y-%m-%d %H:%M:%S"
                     )
 
-            else:
+                    # 4. Сохраняем
+                    self._save_vehicle_details_incremental(vehicle_id, filtered_details)
+                    processed += 1
+
+                    if processed % 10 == 0:
+                        logger.info(
+                            f"Обработано {processed}/{total - skipped} новых записей"
+                        )
+
+                else:
+                    errors += 1
+                    logger.error(
+                        f"[{idx}/{total}] ✗ Ошибка получения деталей для ID: {vehicle_id}"
+                    )
+                    # Add to retry list for potential rescrap at the end
+                    if vehicle_id not in self.scrape_retry_ids:
+                        self.scrape_retry_ids.append(vehicle_id)
+
+            except Exception as e:
                 errors += 1
                 logger.error(
-                    f"[{idx}/{total}] ✗ Ошибка получения деталей для ID: {vehicle_id}"
+                    f"[{idx}/{total}] ✗ Исключение при обработке ID {vehicle_id}: {e}",
+                    exc_info=True
                 )
+                # Add to retry list for potential rescrap at the end
+                if vehicle_id not in self.scrape_retry_ids:
+                    self.scrape_retry_ids.append(vehicle_id)
+
+        # Retry any cars where accident check timed out
+        if self.accident_retry_ids:
+            self._retry_failed_accident_checks()
+
+        # Retry any cars that failed to scrape during initial pass
+        if self.scrape_retry_ids:
+            self._retry_failed_scrapes(
+                translate=translate,
+                process_data=process_data,
+                apply_data_filters=apply_data_filters,
+            )
 
         # Итоговая статистика
         logger.info("=" * 60)

@@ -8,6 +8,7 @@ env/
 # Data
 data/
 *.jsonl
+*.json
 
 # Config secrets
 config/headers.json

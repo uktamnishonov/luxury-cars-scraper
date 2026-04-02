@@ -138,18 +138,27 @@ class Translator:
         translated = {}
 
         for key, value in data.items():
-            if isinstance(value, str):
-                translated[key] = self.translate(value, field_name=key)
-            elif isinstance(value, dict):
-                translated[key] = self.translate_dict(value)
-            elif isinstance(value, list):
-                translated[key] = [
-                    self.translate(item, field_name=key)
-                    if isinstance(item, str)
-                    else item
-                    for item in value
-                ]
-            else:
+            try:
+                if isinstance(value, str):
+                    translated[key] = self.translate(value, field_name=key)
+                elif isinstance(value, dict):
+                    translated[key] = self.translate_dict(value)
+                elif isinstance(value, list):
+                    translated_list = []
+                    for item in value:
+                        try:
+                            if isinstance(item, str):
+                                translated_list.append(self.translate(item, field_name=key))
+                            else:
+                                translated_list.append(item)
+                        except Exception as e:
+                            logger.error(f"Error translating list item in '{key}': {e}")
+                            translated_list.append(item)
+                    translated[key] = translated_list
+                else:
+                    translated[key] = value
+            except Exception as e:
+                logger.error(f"Error translating key '{key}': {e}")
                 translated[key] = value
 
         return translated

@@ -117,57 +117,66 @@ class CarIDCollector:
         )
 
         while True:
-            # Получаем порцию данных
-            response = self.client.get_car_list(
-                sell_type=sell_type,
-                brand=brand,
-                model=model,
-                start=start,
-                count=current_count,
-                year_from=year_from,
-            )
+            try:
+                # Получаем порцию данных
+                response = self.client.get_car_list(
+                    sell_type=sell_type,
+                    brand=brand,
+                    model=model,
+                    start=start,
+                    count=current_count,
+                    year_from=year_from,
+                )
 
-            if not response:
-                logger.warning(f"Не удалось получить данные для offset {start}")
-                break
+                if not response:
+                    logger.warning(f"Не удалось получить данные для offset {start}")
+                    break
 
-            # Получаем общее количество при первом запросе
-            if total_cars is None:
-                total_cars = response.get("Count", 0)
-                logger.info(f"Всего автомобилей найдено: {total_cars}")
+                # Получаем общее количество при первом запросе
+                if total_cars is None:
+                    total_cars = response.get("Count", 0)
+                    logger.info(f"Всего автомобилей найдено: {total_cars}")
 
-            # Извлекаем ID из результатов
-            search_results = response.get("SearchResults", [])
+                # Извлекаем ID из результатов
+                search_results = response.get("SearchResults", [])
 
-            if not search_results:
-                logger.info("Больше нет результатов")
-                break
+                if not search_results:
+                    logger.info("Больше нет результатов")
+                    break
 
-            new_ids = 0
-            dup_ids = 0
-            for car in search_results:
-                car_id = str(car.get("Id", ""))
-                if car.get("ServiceCopyCar") == "DUPLICATION":
-                    original_id = str(car.get("Photo", "")).split(sep="/")[-1][:-1]
-                    self.duplicated_ids[original_id] = car_id
-                    dup_ids += 1
-                else:
-                    if car_id and car_id not in self.collected_ids:
-                        self.collected_ids.add(car_id)
-                        new_ids += 1
+                new_ids = 0
+                dup_ids = 0
+                for car in search_results:
+                    try:
+                        car_id = str(car.get("Id", ""))
+                        if car.get("ServiceCopyCar") == "DUPLICATION":
+                            original_id = str(car.get("Photo", "")).split(sep="/")[-1][:-1]
+                            self.duplicated_ids[original_id] = car_id
+                            dup_ids += 1
+                        else:
+                            if car_id and car_id not in self.collected_ids:
+                                self.collected_ids.add(car_id)
+                                new_ids += 1
+                    except Exception as e:
+                        logger.error(f"Error processing car data: {e}")
+                        continue
 
-            logger.info(
-                f"Обработано {len(search_results)} результатов. "
-                f"Новых ID: {new_ids}, всего собрано: {len(self.collected_ids)}. "
-                f"Дублированных ID: {dup_ids}, всего собрано дублированных: {len(self.duplicated_ids)}"
-            )
+                logger.info(
+                    f"Обработано {len(search_results)} результатов. "
+                    f"Новых ID: {new_ids}, всего собрано: {len(self.collected_ids)}. "
+                    f"Дублированных ID: {dup_ids}, всего собрано дублированных: {len(self.duplicated_ids)}"
+                )
 
-            # Переходим к следующей порции
-            start += current_count
+                # Переходим к следующей порции
+                start += current_count
 
-            # Проверяем, достигли ли конца
-            if start >= total_cars:
-                logger.info("Достигнут конец списка")
+                # Проверяем, достигли ли конца
+                if start >= total_cars:
+                    logger.info("Достигнут конец списка")
+                    break
+
+            except Exception as e:
+                logger.error(f"Error fetching IDs from API: {e}")
                 break
 
     def collect_all_ids(self, append_mode: bool = False) -> List[str]:
