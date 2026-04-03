@@ -3,10 +3,21 @@
 """
 import logging
 import sys
+import platform
+import io
 from pathlib import Path
 from typing import Optional
 
 from config.paths import PARSER_FILE_LOG, BOT_FILE_LOG
+
+# Windows encoding fix for emoji/UTF-8 output (only wrap once, with error handling)
+if platform.system() == "Windows" and sys.stdout.encoding != 'utf-8':
+    try:
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+    except (AttributeError, ValueError):
+        # Already wrapped or no buffer available
+        pass
 
 
 def setup_logger(
@@ -44,10 +55,13 @@ def setup_logger(
         datefmt='%Y-%m-%d %H:%M:%S'
     )
 
-    # Консольный вывод
+    # Консольный вывод с UTF-8 поддержкой
     if console:
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setFormatter(formatter)
+        # Ensure UTF-8 for Windows
+        if platform.system() == "Windows":
+            console_handler.setLevel(level)
         logger.addHandler(console_handler)
 
     # Файловый вывод

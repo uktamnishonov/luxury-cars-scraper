@@ -5,8 +5,24 @@
 import json
 import time
 import random
+import sys
+import os
+import platform
+import tempfile
+import subprocess
 from datetime import datetime
+from pathlib import Path
 from typing import List, Optional, Set
+
+# UTF-8 console encoding fix for emoji output on Windows (only wrap once)
+if sys.platform.startswith("win") and sys.stdout.encoding != 'utf-8':
+    try:
+        import io
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+    except (AttributeError, ValueError):
+        # Already wrapped or no buffer available
+        pass
 
 from logger.logging import get_parser_logger
 from config.paths import DATA_DETAILS_DIR, IDS_FILE, get_timestamped_filename
@@ -56,9 +72,8 @@ class VehicleDetailsFetcher:
         self.check_history = check_history
         self._ensure_details_dir()
 
-        # Browser instance for accident history checking (reusable)
-        self.playwright = None
-        self.browser = None
+        # Browser worker process for accident history checking
+        self._browser_proc = None
         self.browser_page = None
         self.browser_check_counter = (
             0  # Track cars processed since last browser restart
@@ -84,50 +99,54 @@ class VehicleDetailsFetcher:
 
     def _init_browser(self):
         """
-        Initialize ONE browser instance + ONE tab for reuse across ALL cars.
-        Much faster than creating new browser/tab for each car.
-        This single tab will be reused for all 19,511+ accident checks.
+        Launch Playwright in a separate subprocess.
+        Completely bypasses Windows asyncio ProactorEventLoop vs SelectorEventLoop conflict.
+        The subprocess uses its own Python runtime with its own event loop - no conflicts.
         """
         try:
-            from playwright.sync_api import sync_playwright
+            worker_path = Path(__file__).parent.parent / "browser_worker.py"
+            
+            self._browser_proc = subprocess.Popen(
+                [sys.executable, str(worker_path)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+            )
 
-            self.playwright = sync_playwright().start()
-            self.browser = self.playwright.chromium.launch(
-                headless=True,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-dev-shm-usage",
-                    "--no-sandbox",
-                ],
-            )
-            self.browser_page = self.browser.new_page()
-            logger.info(
-                "🌐 Browser initialized with ONE reusable tab for all accident checks"
-            )
+            # Wait for "ready" signal
+            ready_line = self._browser_proc.stdout.readline()
+            ready = json.loads(ready_line)
+            
+            if ready.get("status") == "ready":
+                self.browser_page = True  # Just a flag - actual page is in subprocess
+                logger.info("🌐 Browser worker process started successfully")
+            else:
+                raise RuntimeError(f"Unexpected ready signal: {ready_line}")
+
         except Exception as e:
-            logger.error(f"Failed to initialize browser: {e}")
-            self.playwright = None
-            self.browser = None
+            import traceback
+            logger.error(f"❌ Failed to start browser worker: {e}")
+            logger.error(traceback.format_exc())
+            self._browser_proc = None
             self.browser_page = None
 
     def _restart_browser(self):
         """
-        Restart browser to simulate human behavior (taking breaks, new sessions).
+        Restart browser worker to simulate human behavior (taking breaks, new sessions).
         Called at random intervals (90-110 cars) to look more natural.
         """
         try:
             logger.info(
-                f"🔄 Restarting browser after {self.browser_check_counter} cars (session break)..."
+                f"🔄 Restarting browser worker after {self.browser_check_counter} cars (session break)..."
             )
 
-            # Close existing browser
-            if self.browser_page:
-                self.browser_page.close()
-            if self.browser:
-                self.browser.close()
-            if self.playwright:
-                self.playwright.stop()
-
+            # Stop existing worker
+            self._close_browser()
+            
             # Reset counter and set new random restart target
             self.browser_check_counter = 0
             self.next_restart_at = random.randint(
@@ -138,13 +157,26 @@ class VehicleDetailsFetcher:
             # Small pause to simulate break (2-5 seconds)
             time.sleep(random.uniform(2, 5))
 
-            # Initialize new browser
+            # Initialize new browser worker
             self._init_browser()
-            logger.info("✅ Browser restarted successfully")
+            logger.info("✅ Browser worker restarted successfully")
         except Exception as e:
-            logger.error(f"Error restarting browser: {e}")
+            logger.error(f"Error restarting browser worker: {e}")
             # Try to reinitialize
             self._init_browser()
+
+    def _close_browser(self):
+        """Close browser worker process cleanly"""
+        if self._browser_proc:
+            try:
+                self._browser_proc.stdin.write(json.dumps({"cmd": "quit"}) + "\n")
+                self._browser_proc.stdin.flush()
+                self._browser_proc.wait(timeout=5)
+            except Exception:
+                self._browser_proc.kill()
+            finally:
+                self._browser_proc = None
+                self.browser_page = None
 
     def _load_ids(self) -> List[str]:
         """Загружает список ID из файла"""
@@ -221,15 +253,45 @@ class VehicleDetailsFetcher:
         return extracted
 
     def _save_vehicle_details_incremental(self, vehicle_id: str, details: dict):
-        """Сохраняет детали автомобиля в JSON Lines файл"""
+        """Сохраняет детали автомобиля в JSON Lines файл с атомарной записью"""
         file_path = DATA_DETAILS_DIR / self.output_file
 
         try:
-            with open(file_path, "a", encoding="utf-8") as f:
-                record = {"id": vehicle_id, "details": details}
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            # Atomic write using tempfile to prevent corruption on interrupt
+            temp_fd, temp_path = tempfile.mkstemp(
+                suffix=".jsonl",
+                dir=str(DATA_DETAILS_DIR),
+                text=False
+            )
+            
+            try:
+                with os.fdopen(temp_fd, 'w', encoding='utf-8') as temp_file:
+                    record = {"id": vehicle_id, "details": details}
+                    temp_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+                
+                # Atomic append: read existing, write to temp, rename
+                if file_path.exists():
+                    with open(file_path, 'r', encoding='utf-8') as existing:
+                        existing_content = existing.read()
+                    with open(temp_path, 'w', encoding='utf-8') as merge:
+                        merge.write(existing_content)
+                        record = {"id": vehicle_id, "details": details}
+                        merge.write(json.dumps(record, ensure_ascii=False) + "\n")
+                
+                # Atomic rename
+                if platform.system() == "Windows":
+                    # Windows requires explicit removal
+                    if file_path.exists():
+                        file_path.unlink()
+                    os.rename(temp_path, str(file_path))
+                else:
+                    os.replace(temp_path, str(file_path))
+            except Exception as temp_error:
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
+                raise temp_error
         except Exception as e:
-            logger.error(f"Ошибка сохранения деталей для ID {vehicle_id}: {e}")
+            logger.error(f"❌ Ошибка сохранения деталей для ID {vehicle_id}: {e}")
 
     def _parse_options(self, options_data: dict | None) -> dict:
         """Преобразует данные об опциях API в словарь True/False, проверяя только 'standard'"""
@@ -252,66 +314,35 @@ class VehicleDetailsFetcher:
 
         result = {"has_accident": None, "details": []}
 
-        if not self.browser_page:
-            logger.warning(f"⚠️ Browser not initialized for {vehicle_id}, queueing for retry")
+        if not self.browser_page or not self._browser_proc:
+            logger.warning(f"⚠️ Browser worker not initialized for {vehicle_id}, queueing for retry")
             if vehicle_id:
                 self.accident_retry_ids.append(vehicle_id)
             return result
 
         try:
-            page = self.browser_page
-            page.set_default_timeout(12000)  # 12 second timeout built into Playwright
-            
-            page.goto(accident_url, wait_until="load", timeout=10000)
-            page.wait_for_selector("body", timeout=3000)
-            page_text = page.evaluate("() => document.body.innerText")
+            request = json.dumps({"cmd": "check", "url": accident_url, "vehicle_id": vehicle_id})
+            self._browser_proc.stdin.write(request + "\n")
+            self._browser_proc.stdin.flush()
 
-            own_damage_pattern = r"보험사고\s*이력\s*\(내차\s*피해\)\s*(\d+)회\s*([\d,]+)원"
-            others_damage_pattern = r"보험사고\s*이력\s*\(타차\s*가해\)\s*(\d+)회[/\s]*([\d,]+)원"
+            response_line = self._browser_proc.stdout.readline()
+            response = json.loads(response_line)
 
-            has_accident = False
-            accident_details = []
-
-            for match in re.findall(own_damage_pattern, page_text):
-                count = int(match[0])
-                if count > 0:
-                    has_accident = True
-                    accident_details.append({
-                        "accident_type": "Accidents Caused By Other Drivers",
-                        "accident_count": count,
-                        "total_cost": match[1],
-                    })
-
-            for match in re.findall(others_damage_pattern, page_text):
-                count = int(match[0])
-                if count > 0:
-                    has_accident = True
-                    accident_details.append({
-                        "accident_type": "Accidents Caused By This Car's Owner",
-                        "accident_count": count,
-                        "total_cost": match[1],
-                    })
-
-            result["has_accident"] = has_accident
-            result["details"] = accident_details
-            logger.info(f"✅ Accident check successful for {vehicle_id}: has_accident={has_accident}")
+            if "error" in response and response.get("has_accident") is None:
+                logger.warning(f"⚠️ Browser worker error for {vehicle_id}: {response['error']}")
+                if vehicle_id and vehicle_id not in self.accident_retry_ids:
+                    self.accident_retry_ids.append(vehicle_id)
+            else:
+                result["has_accident"] = response["has_accident"]
+                result["details"] = response["details"]
+                logger.info(f"✅ Accident check OK for {vehicle_id}: has_accident={result['has_accident']}")
 
         except Exception as e:
-            error_msg = str(e)
-            logger.warning(f"⚠️ Accident check failed for {vehicle_id}: {error_msg}")
-            
-            # ALWAYS queue for retry if check failed - ensure no car is left behind
+            logger.warning(f"⚠️ Accident check failed for {vehicle_id}: {e}")
             if vehicle_id and vehicle_id not in self.accident_retry_ids:
                 self.accident_retry_ids.append(vehicle_id)
-                logger.info(f"📋 Queued {vehicle_id} for retry (total queued: {len(self.accident_retry_ids)})")
-            
-            # If browser is in bad state, restart it
-            if "browser" in error_msg.lower() or "closed" in error_msg.lower():
-                logger.info("🔄 Restarting browser due to browser error")
-                try:
-                    self._restart_browser()
-                except Exception as restart_err:
-                    logger.error(f"Failed to restart browser: {restart_err}")
+            # Restart worker if it died
+            self._restart_browser()
 
         return result
 
@@ -587,6 +618,9 @@ class VehicleDetailsFetcher:
 
         for idx, vehicle_id in enumerate(vehicle_ids, 1):
             try:
+                logger.info(f"[{idx}/{total}] ▶️ START: Processing vehicle ID {vehicle_id}")
+                sys.stdout.flush()
+                
                 # Пропускаем уже обработанные
                 if skip_existing and vehicle_id in already_fetched:
                     skipped += 1
@@ -597,9 +631,12 @@ class VehicleDetailsFetcher:
                     continue
 
                 logger.info(f"[{idx}/{total}] Получаем детали для ID: {vehicle_id}")
+                sys.stdout.flush()
 
                 # Получаем детали
                 details = self.client.get_vehicle_details(vehicle_id)
+                logger.info(f"[{idx}/{total}] ✓ API call completed for ID {vehicle_id}")
+                sys.stdout.flush()
 
                 if details:
                     # Извлекаем только нужные поля
@@ -627,7 +664,11 @@ class VehicleDetailsFetcher:
 
                             # Restart browser at random intervals (90-110 cars) to look more human
                             if self.browser_check_counter >= self.next_restart_at:
+                                logger.info(f"[{idx}/{total}] 🔄 Browser restart triggered after {self.browser_check_counter} cars")
+                                sys.stdout.flush()
                                 self._restart_browser()
+                                logger.info(f"[{idx}/{total}] ✅ Browser restart completed")
+                                sys.stdout.flush()
 
                             # Добавляем дополнительную случайную задержку после проверки аварий
                             delay = ACCIDENT_CHECK_DELAY + random.uniform(
@@ -646,11 +687,19 @@ class VehicleDetailsFetcher:
 
                     # 1. Обрабатываем данные (очистка, форматирование)
                     if process_data:
+                        logger.info(f"[{idx}/{total}] ⚙️ Starting data processing for ID {vehicle_id}")
+                        sys.stdout.flush()
                         filtered_details = self.processor.process_dict(filtered_details)
+                        logger.info(f"[{idx}/{total}] ✓ Data processing completed for ID {vehicle_id}")
+                        sys.stdout.flush()
 
                     # 2. Переводим
                     if translate:
+                        logger.info(f"[{idx}/{total}] 🌐 Starting translation for ID {vehicle_id}")
+                        sys.stdout.flush()
                         filtered_details = self.translator.translate_dict(filtered_details)
+                        logger.info(f"[{idx}/{total}] ✓ Translation completed for ID {vehicle_id}")
+                        sys.stdout.flush()
 
                     # 3. Применяем фильтры
                     self.filter_stats["total_processed"] += 1
@@ -665,7 +714,11 @@ class VehicleDetailsFetcher:
                     )
 
                     # 4. Сохраняем
+                    logger.info(f"[{idx}/{total}] 💾 Saving vehicle {vehicle_id} to file")
+                    sys.stdout.flush()
                     self._save_vehicle_details_incremental(vehicle_id, filtered_details)
+                    logger.info(f"[{idx}/{total}] ✓ Vehicle {vehicle_id} saved successfully")
+                    sys.stdout.flush()
                     processed += 1
 
                     if processed % 10 == 0:
@@ -753,14 +806,5 @@ class VehicleDetailsFetcher:
     def close(self):
         """Закрывает соединения"""
         self.client.close()
-
-        # Close browser instance if it was initialized
-        if self.browser_page:
-            self.browser_page.close()
-            logger.info("🌐 Browser page closed")
-        if self.browser:
-            self.browser.close()
-            logger.info("🌐 Browser closed")
-        if self.playwright:
-            self.playwright.stop()
-            logger.info("🌐 Playwright stopped")
+        self._close_browser()
+        logger.info("🌐 Browser worker closed")

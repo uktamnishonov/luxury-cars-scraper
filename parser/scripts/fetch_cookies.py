@@ -13,6 +13,26 @@
 import json
 import random
 import time
+import sys
+import platform
+import io
+
+# Windows encoding fix (only wrap if not already done)
+if platform.system() == "Windows":
+    if sys.stdout.encoding != 'utf-8':
+        try:
+            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+            sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+        except (AttributeError, ValueError):
+            # Already wrapped or no buffer available
+            pass
+    
+    # Fix EventLoop conflict for Playwright on Windows
+    try:
+        import asyncio
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    except Exception:
+        pass
 
 from playwright.sync_api import sync_playwright
 from undetected_playwright import stealth_sync

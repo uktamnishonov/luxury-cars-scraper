@@ -5,6 +5,7 @@
 
 import json
 from typing import Any, Dict, Optional
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
 from deep_translator import GoogleTranslator
 
@@ -97,7 +98,19 @@ class Translator:
 
         # Если перевод не найден, обращаемся к deep-translator
         try:
-            translated = GoogleTranslator(source="ko", target="en").translate(text)
+            # Use ThreadPoolExecutor with timeout instead of signal-based SIGALRM
+            # This works reliably in WSL and multi-threaded environments
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(
+                    GoogleTranslator(source="ko", target="en").translate, text
+                )
+                try:
+                    translated = future.result(timeout=5)  # 5-second timeout
+                except FuturesTimeoutError:
+                    logger.warning(f"⏱️ Translation API timeout for '{text}' - returning original")
+                    self.stats["cache_misses"] += 1
+                    return text
+                
             self.stats["cache_misses"] += 1
             logger.info(f"Переведено через API: '{text}' -> '{translated}'")
 
@@ -109,7 +122,7 @@ class Translator:
 
             return translated
 
-        except Exception:
+        except Exception as e:
             # Если не удалось перевести через API, добавляем в missing
             self.stats["cache_misses"] += 1
             category = field_name or "unknown"
@@ -119,7 +132,7 @@ class Translator:
                 self.missing_translations[category].add(text)
                 self._save_missing_translations()
                 logger.warning(
-                    f"Не найден перевод и API упал для '{text}' (категория: {category})"
+                    f"Не найден перевод и API упал для '{text}' (категория: {category}): {str(e)[:100]}"
                 )
 
             return text

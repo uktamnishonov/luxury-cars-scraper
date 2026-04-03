@@ -8,9 +8,21 @@ The filtered results are saved to a new JSONL file.
 import json
 import argparse
 import sys
+import platform
+import io
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
+
+# Windows encoding fix for emoji output (only wrap if not already done)
+if platform.system() == "Windows":
+    if sys.stdout.encoding != 'utf-8':
+        try:
+            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+            sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+        except (AttributeError, ValueError):
+            # Already wrapped or no buffer available
+            pass
 
 # Ensure project root is importable when running this file directly
 PROJECT_ROOT = Path(__file__).resolve().parents[2]

@@ -2,8 +2,29 @@
 Главный файл для запуска парсера Encar.com
 """
 
+import sys
+import asyncio
+
+# CRITICAL: Set Windows event loop policy BEFORE any other imports
+# Python 3.11+ on Windows defaults to ProactorEventLoop, which breaks Playwright
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    # Also force create a fresh SelectorEventLoop (in case ProactorEventLoop was already instantiated)
+    asyncio.set_event_loop(asyncio.SelectorEventLoop())
+
 import argparse
+import platform
+import io
 from typing import List, Optional
+
+# Windows UTF-8 encoding fix for emoji output (only wrap if not already done)
+if sys.platform.startswith("win") and sys.stdout.encoding != 'utf-8':
+    try:
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+    except (AttributeError, ValueError):
+        # Already wrapped or no buffer available
+        pass
 
 from logger.logging import get_parser_logger
 from parser.collectors.details_fetcher import VehicleDetailsFetcher
